@@ -1,0 +1,705 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>缓存原理</title>
+<style>
+:root{
+  --bg:#fbfbfd; --ink:#1d1d1f; --ink2:#424245; --mute:#6e6e73; --faint:#737378;
+  --accent:#3f5bd0; --line:#c4c5cb; --label:#9a9aa0;
+  --ease:cubic-bezier(.22,.61,.36,1); --ease-out:cubic-bezier(.16,1,.3,1);
+  --gutter:max(20px,6vw);
+  --font:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC","Helvetica Neue","Segoe UI",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  color-scheme:light;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{background:var(--bg);color:var(--ink);font-family:var(--font);-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);font-size:17px;line-height:1.6;overflow-x:hidden}
+p,h1,h2,ol,ul{margin:0}
+button{font:inherit}
+p,li{text-wrap:pretty}
+h1,h2,.steps>li .t,.cap .t{text-wrap:balance}
+.nw{white-space:nowrap}   /* 术语、「数字 + 单位」不拆行：文字里写 {{1,380 亿 token}} */
+code{white-space:nowrap;font-family:var(--mono);font-size:.86em;color:var(--ink);background:rgba(0,0,0,.045);padding:.08em .35em;border-radius:5px}
+
+/* 顶部导航 */
+.nav{position:fixed;z-index:30;top:14px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:2px;height:42px;padding:0 5px;border-radius:999px;background:rgba(255,255,255,.74);-webkit-backdrop-filter:saturate(180%) blur(20px);backdrop-filter:saturate(180%) blur(20px);box-shadow:0 0 0 1px rgba(0,0,0,.06),0 10px 30px -12px rgba(0,0,0,.12)}
+.nav a,.nav button{font-size:13px;line-height:1;color:var(--ink2);text-decoration:none;padding:9px 12px;border:0;border-radius:999px;background:transparent;cursor:pointer;white-space:nowrap;transition:color .3s var(--ease),background-color .3s var(--ease)}
+.nav a:hover,.nav button:hover{color:var(--ink)}
+.nav .mark{font-weight:600;color:var(--ink);padding-left:13px}
+.nav a[aria-current="true"]{color:var(--ink);background:rgba(0,0,0,.05)}
+.nav button[aria-pressed="true"]{color:var(--accent);background:rgba(63,91,208,.08)}
+
+.page{min-height:100vh;min-height:100svh}
+.r{will-change:opacity,transform}
+
+/* 开头页 */
+.hero{display:grid;align-content:center;padding:130px var(--gutter) 60px}
+.hero .meta{font-size:14px;color:var(--faint);margin-bottom:18px}
+.hero h1{font-size:clamp(40px,5.4vw,78px);line-height:1.1;font-weight:600;letter-spacing:.02em}
+.hero .alt{display:block;margin-top:.5em;font-size:max(17px,.3em);font-weight:500;color:var(--faint)}
+.hero .lede{margin-top:34px;max-width:30em;font-size:clamp(19px,1.6vw,23px);line-height:1.6;color:var(--ink)}
+.hero .hint{margin-top:30px;font-size:14px;color:var(--mute);display:flex;align-items:center;gap:10px}
+.hero .hint::before{content:"";width:1px;height:28px;background:linear-gradient(var(--faint),transparent)}
+.stages{margin-top:30px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;max-width:64rem}
+.stages>div{padding:16px 18px 17px;border-radius:16px;background:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.06),0 8px 24px -16px rgba(0,0,0,.18)}
+.stages .k{display:block;font-size:13px;color:var(--accent);font-variant-numeric:tabular-nums;letter-spacing:.04em}
+.stages .h{display:block;margin-top:2px;font-size:17px;font-weight:600;color:var(--ink)}
+.stages .s{display:block;margin-top:6px;font-size:15px;line-height:1.6;color:var(--ink2)}
+@media (max-width:760px){.stages{grid-template-columns:1fr}}
+
+/* 模块页：左边文字，右边一张固定的图，跟着当前步骤动 */
+.mod{display:grid;align-content:center;padding:110px var(--gutter) 60px}
+.mod .col{max-width:min(25rem,27vw)}
+@media (min-width:901px){.page.mod{overflow:hidden}}   /* 左栏往上挪时不越过这一页的上沿，不会跑进上一页 */
+.mod .meta{display:flex;align-items:baseline;gap:14px;margin-bottom:16px;font-size:14px;color:var(--faint)}
+.mod .meta .num{font-variant-numeric:tabular-nums;letter-spacing:.04em;color:var(--accent)}
+.mod h2{font-size:clamp(32px,3.3vw,46px);line-height:1.1;font-weight:600;letter-spacing:.02em}
+.mod .line{margin-top:14px;font-size:clamp(18px,1.45vw,21px);line-height:1.55;color:var(--mute)}
+.steps{list-style:none;padding:0;margin-top:28px;display:grid;gap:2px}
+.steps>li{position:relative;padding:9px 0 9px 44px;cursor:pointer;color:var(--faint);border-radius:10px;transition:color .5s var(--ease)}
+.steps>li:hover{color:var(--ink2)}
+.steps>li::before{content:attr(data-n);position:absolute;left:0;top:10px;font-size:13px;font-variant-numeric:tabular-nums;letter-spacing:.04em;color:var(--label);transition:color .5s var(--ease)}
+.steps>li .t{font-size:17px;font-weight:600;line-height:1.4}
+.steps>li .d{display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows .7s var(--ease-out),opacity .5s var(--ease),margin .7s var(--ease-out)}
+.steps>li.on{color:var(--ink)}
+.steps>li.on::before{color:var(--accent)}
+.steps>li.on .d{grid-template-rows:1fr;opacity:1;margin-top:6px;transition:grid-template-rows .9s var(--ease-out),opacity .7s var(--ease) .18s,margin .9s var(--ease-out)}
+.steps>li .d>.dx{overflow:hidden;font-size:15px;line-height:1.65;color:var(--ink2)}
+.lead{margin:0;color:var(--ink)}
+.pts{list-style:none;margin:8px 0 0;padding:0}
+.pts li{position:relative;padding-left:15px;margin-top:5px}
+.pts li::before{content:"";position:absolute;left:2px;top:.7em;width:5px;height:5px;border-radius:50%;background:var(--accent);opacity:.5}
+.dx b,.cap b,.row b{font-weight:600;color:var(--ink)}
+.mod .ctl{display:none;gap:8px;margin-top:18px}
+.mod .ctl button{border:0;border-radius:999px;padding:9px 16px;background:rgba(0,0,0,.05);color:var(--ink2);font-size:14px}
+
+/* 左边目录 */
+.rail{position:fixed;z-index:20;left:14px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 4px;border-radius:999px;background:rgba(255,255,255,.74);-webkit-backdrop-filter:saturate(180%) blur(20px);backdrop-filter:saturate(180%) blur(20px);box-shadow:0 0 0 1px rgba(0,0,0,.06),0 10px 30px -12px rgba(0,0,0,.12)}
+.rail a{display:block;text-decoration:none;color:var(--faint);border-radius:999px;cursor:pointer;transition:color .3s var(--ease),background-color .3s var(--ease)}
+.rail a:hover{color:var(--ink)}
+.rail a.sec{writing-mode:vertical-rl;font-size:12px;letter-spacing:.14em;padding:10px 6px}
+.rail a.num{width:28px;height:24px;display:grid;place-items:center;font-size:11px;font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.rail a.sec.in{color:var(--ink)}
+.rail a[aria-current="true"]{color:var(--accent);background:rgba(63,91,208,.1)}
+.rail i{display:block;width:12px;height:1px;background:rgba(0,0,0,.08);margin:3px 0}
+@media (max-width:900px){.rail{display:none}}
+
+/* 右边的图 */
+.dock{position:fixed;z-index:2;top:64px;bottom:28px;right:max(16px,2.2vw);left:calc(var(--gutter) + min(25rem,27vw) + 2.5vw);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .7s var(--ease)}
+.dock.on{opacity:1;pointer-events:auto}
+#fig{width:100%;height:auto;max-height:100%;display:block}
+.dock .cap{display:none}
+.cap .n{font-size:13px;color:var(--accent);font-variant-numeric:tabular-nums;letter-spacing:.04em;margin-right:12px}
+.cap .ph{font-size:13px;color:var(--faint);margin-right:12px}
+.cap .t{font-size:20px;font-weight:600}
+.cap .d{margin-top:4px;font-size:15.5px;line-height:1.65;color:var(--ink2);max-width:none}
+.cap .d .pts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:32px;row-gap:1px;margin-top:4px}
+.cap .d .pts li{margin-top:0}
+@media (min-width:901px){   /* 「放大图」：图占满屏幕，说明挪到图上方 */
+  body.big .dock{left:84px;right:max(16px,2vw);top:66px;flex-direction:column;align-items:stretch;justify-content:flex-start;background:var(--bg);z-index:15}
+  body.big .dock .cap{display:block;flex:none;padding:6px 6px 4px;min-height:84px}
+  body.big #fig{flex:1 1 auto;min-height:0;width:100%;height:100%;max-height:none}
+  body.big .mod .col{visibility:hidden}
+}
+.bar{position:absolute;left:0;right:0;bottom:0;height:2px;background:rgba(0,0,0,.06);border-radius:2px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--accent)}
+@media (max-width:900px){
+  #zoom{display:none}
+  .nav{left:8px;right:8px;transform:none;overflow-x:auto;scrollbar-width:none}
+  .nav::-webkit-scrollbar{display:none}
+  .nav .mark{display:none}
+  .mod{align-content:start;padding:calc(44vh + 76px) 16px 40px;min-height:100vh}
+  .mod .col{max-width:none}
+  .mod .ctl{display:flex}
+  .dock{top:60px;left:0;right:0;bottom:auto;height:44vh;padding:0 12px 10px;background:var(--bg)}
+  .bar{left:12px;right:12px}
+}
+
+/* 图里的文字和框（SVG）。字号最小 14：图在 1280 宽的屏上会缩到约 0.8 倍，再小就低于 11px 看不清（check.js 的 fontsize 项会拦） */
+svg text{font-family:var(--font)}
+.fx-box{fill:#fff;stroke:var(--line);stroke-width:1}
+.fx-t{fill:var(--ink2);font-size:15px;font-weight:600;dominant-baseline:central}
+.fx-s{fill:var(--label);font-size:14px;dominant-baseline:central}
+.fx-mono{fill:var(--mute);font-family:var(--mono);font-size:14px;dominant-baseline:central;white-space:pre}
+.fx-note{fill:var(--mute);font-size:14px;dominant-baseline:central}
+.fx-note.act{fill:#e8590c}
+.fx-note.blue{fill:var(--accent)}
+.fx-note.red{fill:#c25a46}
+.fx-disk{fill:rgba(29,29,31,.025);stroke:#c4c5cb;stroke-width:1;stroke-dasharray:4 3}
+.halo{paint-order:stroke;stroke:#fbfbfd;stroke-width:5px;stroke-linejoin:round}   /* 压在连线上的字：白描边 */
+
+/* 结尾页 */
+.recap-h{margin-top:34px;font-size:17px;font-weight:600}
+.recap{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:6px;font-size:15.5px;color:var(--ink2)}
+.recap li{display:grid;grid-template-columns:2.2em minmax(0,1fr);cursor:pointer}
+.recap li::before{content:attr(data-n);color:var(--accent);font-size:13px;font-variant-numeric:tabular-nums;padding-top:.15em}
+.recap li b{font-weight:600;color:var(--ink)}
+.exp{display:grid;align-content:center;padding:110px var(--gutter) 90px}
+.exp .col{max-width:72rem}
+.sec{font-size:clamp(32px,3.4vw,46px);line-height:1.1;font-weight:600;letter-spacing:.02em}
+.rows{list-style:none;padding:0;margin-top:30px}
+.row{display:grid;grid-template-columns:12rem minmax(0,1fr);grid-template-rows:auto 1fr;column-gap:24px;padding:15px 0;border-top:1px solid rgba(0,0,0,.08)}
+.row .when{grid-column:1;grid-row:1;color:var(--faint);font-size:15px;padding-top:2px}
+.row .org{grid-column:1;grid-row:2;font-weight:600;font-size:15.5px}
+.row .title{grid-column:2;grid-row:1 / span 2;color:var(--mute);font-size:16px}
+.row .title .pts{margin-top:0}
+.row .title .pts li{color:var(--ink2);margin-top:3px}
+.row .pts li:first-child{margin-top:0}
+@media (max-width:640px){.row{grid-template-columns:1fr}.row .when,.row .org,.row .title{grid-column:1;grid-row:auto}.row .title{margin-top:6px}}
+.earlier{margin-top:22px;font-size:14px;color:var(--mute)}
+</style>
+</head>
+<body>
+<nav class="nav" id="nav" aria-label="页面"></nav>
+
+<!-- ===== 开头页：一句话讲清这页要回答什么问题，卡片 = 各模块一句话预告 ===== -->
+<header class="page hero" id="top">
+  <div>
+    <p class="meta r">模板示例 · 原理演示</p>
+    <h1 class="r">同一份数据<br>为什么不用每次都查库<span class="alt">没有缓存 → 加一层缓存</span></h1>
+    <p class="lede r">三个页面要显示同一条商品信息，分两段看：</p>
+    <div class="stages r"><div><span class="k">01</span><span class="h">没有缓存</span><span class="s">每个页面都去数据库读一次：<b>3 个页面，读 3 次</b></span></div><div><span class="k">02</span><span class="h">加一层缓存</span><span class="s">第一次读完放进缓存，后面的页面直接读缓存：<b>数据库只读 1 次</b></span></div></div>
+    <p class="hint r">滚轮、方向键或空格：一次走一步　·　点任一步：重放那一步　·　顶部「放大图」或按 F：图占满屏幕</p>
+  </div>
+</header>
+
+<nav class="rail" id="rail" aria-label="目录"></nav>
+<div class="dock" id="dock"><div class="cap" id="cap"><span class="n" id="capn"></span><span class="ph" id="capph"></span><span class="t" id="capt"></span><div class="d" id="capd"></div></div><svg id="fig" viewBox="0 0 1000 640" role="img" aria-label="三个页面读同一条数据：没有缓存和有缓存的对比动画"></svg><div class="bar"><i id="barfill"></i></div></div>
+
+<!-- 各模块页由脚本按 MODULES 生成，插在这里（#where 之前） -->
+
+<!-- ===== 结尾页：效果、现状、限制。数字写出处 ===== -->
+<section class="page exp" id="where">
+  <div class="col">
+    <h2 class="sec r">小结</h2>
+    <ul class="rows r">
+      <!-- 第一行先回答「所以呢」：对读者意味着什么、现在做到哪了 -->
+      <li class="row"><span class="when">效果</span><span class="org">示例数字</span><div class="title"><ol class="pts"><li>3 个页面读同一条数据：读库 <b>3 次 → 1 次</b></li></ol></div></li>
+      <li class="row"><span class="when">代价</span><span class="org">要注意的</span><div class="title"><ol class="pts"><li>数据改了以后，缓存里那份要想办法更新或作废</li></ol></div></li>
+    </ul>
+    <!-- 全过程一览：脚本按 MODULES 自动生成，每步一行。动画只管「第一次看懂」，回头查阅靠这一段 -->
+    <h3 class="recap-h r">全过程一览</h3>
+    <ol class="recap r" id="recap"></ol>
+    <!-- 页脚：哪天的快照、对着什么核的 -->
+    <p class="earlier r">更新：2026-11 · 示例页，没有对应的代码版本 · 图里的格子是示意</p>
+  </div>
+</section>
+
+<script>
+(function(){
+"use strict";
+
+/* ================================================================
+   A. 内容：模块和步骤 —— 改这里
+   - 每个模块一页；每个步骤是一次滚轮 / 一次按键走完的一段动画。
+   - 步骤的 id 用来在画面代码里定时间：T("id", 0.4) = 这一步走到 40% 的时刻。
+     调整步骤顺序、插入步骤都不用改画面里的时间。
+   - dur：这一步动画多少毫秒（缺省 2600；内容多的步骤给 4000–6500）。
+   - lead 一句话，pts 是要点；**加粗**、`代码`、{{不拆行的词}} 可用（术语、「数字 + 单位」包上 {{ }}）。
+   ================================================================ */
+var PAGE={ mark:"缓存原理", end:{nav:"小结", rail:"小结"} };
+var MODULES=[
+ { id:"m1", nav:"1 没有缓存", rail:"没有缓存", meta:"每次都查库", title:"没有缓存",
+   line:"每个页面要数据，都去数据库读一次。",
+   steps:[
+    { id:"db", t:"数据在数据库里", dur:2200,
+      lead:"先看最底下：要显示的那条商品信息，存在数据库里。",
+      pts:["图里每个小块代表一份数据"] },
+    { id:"direct", t:"三个页面各读一次", dur:5200,
+      lead:"三个页面先后打开，每个都向数据库发一次请求，各拿回一份。",
+      pts:["3 个页面，数据库被读 **3 次**"] }
+   ]},
+ { id:"m2", nav:"2 加一层缓存", rail:"加缓存", meta:"读过的放内存", title:"加一层缓存",
+   line:"第一次读完放进缓存，后面的直接读缓存。",
+   steps:[
+    { id:"fill", t:"第一次读：顺手放进缓存", dur:4600,
+      lead:"换成有缓存，从头看：页面 1 先问缓存，缓存里没有，再去数据库读，读回来在缓存里留一份。",
+      pts:["这一次和没有缓存时一样，要读一次数据库"] },
+    { id:"hit", t:"之后都读缓存里那一份", dur:4200,
+      lead:"页面 2、3 要同一条数据：缓存里已经有了，直接返回。",
+      pts:["两个页面读的是缓存里的**同一份**（橙圈）", "数据库只被读了 **1 次**"] }
+   ]}
+];
+
+/* ================================================================
+   B1. 引擎（上半）：时间轴、关键帧、SVG 小工具 —— 一般不用改
+   ================================================================ */
+var NS="http://www.w3.org/2000/svg";
+var svg=document.getElementById("fig");
+var reduced=window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function bez(x1,y1,x2,y2){
+  return function(t){
+    if(t<=0)return 0; if(t>=1)return 1;
+    var u=t;
+    for(var i=0;i<8;i++){
+      var x=3*x1*u*(1-u)*(1-u)+3*x2*u*u*(1-u)+u*u*u-t;
+      var dx=3*x1*(1-u)*(1-u)+6*(x2-x1)*u*(1-u)+3*(1-x2)*u*u;
+      if(Math.abs(x)<1e-5||Math.abs(dx)<1e-6)break;
+      u=Math.min(1,Math.max(0,u-x/dx));
+    }
+    return 3*y1*u*(1-u)*(1-u)+3*y2*u*u*(1-u)+u*u*u;
+  };
+}
+var MOVE=bez(.65,0,.35,1);      // 移动：两头慢、中间快
+var FADE=bez(.25,.1,.25,1);     // 淡入淡出
+var SCROLL=bez(.65,0,.35,1);
+
+/* 把模块摊平成步骤表。时间轴：第 k 步（从 0 数）占 [k, k+1]，0 = 第 1 步开始前 */
+var STEPS=[], PH=[], FIRST=[], LAST=[], IDX={};
+MODULES.forEach(function(m,mi){
+  FIRST.push(STEPS.length);
+  m.steps.forEach(function(s){ if(IDX[s.id]!=null)throw new Error("步骤 id 重复："+s.id); IDX[s.id]=STEPS.length; STEPS.push(s); PH.push(mi); });
+  LAST.push(STEPS.length-1);
+});
+var NMOD=MODULES.length, NSTEP=STEPS.length;
+var DUR=STEPS.map(function(s){ return s.dur||2600; });
+/* T("id", f)：步骤 id 走到 f（0–1）的时刻。T("id") = 这一步开始，T("id",1) = 这一步结束 */
+function T(id,f){ if(IDX[id]==null)throw new Error("T()：没有这个步骤 id："+id); return IDX[id]+(f||0); }
+
+/* 关键帧：[[时刻,{属性…}], …]。没写的属性沿用前一帧的值（注意：这会把位置「钉住」，见 references/engine.md） */
+function norm(keys){
+  var prev={}; return keys.map(function(k){ var o={},a; for(a in prev)o[a]=prev[a]; for(a in k[1])o[a]=k[1][a]; prev=o; return [k[0],o]; });
+}
+function at(keys,p,ef){
+  if(p<=keys[0][0])return keys[0][1];
+  for(var i=1;i<keys.length;i++){
+    if(p<=keys[i][0]){
+      var a=keys[i-1],b=keys[i],t=(b[0]===a[0])?1:ef((p-a[0])/(b[0]-a[0])),o={};
+      for(var k in b[1]){ var x=a[1][k],y=b[1][k]; o[k]=(typeof y==="number"&&typeof x==="number")?x+(y-x)*t:y; }
+      return o;
+    }
+  }
+  return keys[keys.length-1][1];
+}
+var OBJ=[];
+/* add({keys, draw, ease})：登记一个会动的对象。draw(v) 每帧拿到插值后的属性 */
+function add(o){
+  for(var i=1;i<o.keys.length;i++) if(o.keys[i][0]<o.keys[i-1][0]) throw new Error("关键帧时刻要从小到大（第 "+(i+1)+" 帧比前一帧早）："+JSON.stringify(o.keys.map(function(k){ return Math.round(k[0]*1000)/1000; }))+"。整数部分是第几步（从 0 数），小数是这一步里的比例");
+  o.keys=norm(o.keys); OBJ.push(o); return o;
+}
+function mix(a,b){ var o={},k; for(k in a)o[k]=a[k]; for(k in b)o[k]=b[k]; return o; }
+function el(tag,attrs,parent){ var e=document.createElementNS(NS,tag); for(var k in attrs)e.setAttribute(k,attrs[k]); (parent||svg).appendChild(e); return e; }
+function txt(cls,x,y,s,parent,extra){ var t=el("text",mix({"class":cls,x:x,y:y},extra||{}),parent||svg); t.textContent=s; return t; }
+function box(r,v){ r.setAttribute("x",v.x); r.setAttribute("y",v.y); r.setAttribute("width",Math.max(0,v.w)); r.setAttribute("height",Math.max(0,v.h)); }
+var FD=0.1;   // 淡入淡出占一步的多少
+/* fade(节点, keys)：只动透明度，keys 里用 {o:…} */
+function own(n){ if(n.__op)throw new Error("这个节点的透明度已经有一处在管了（show / span / fade / moveBox / drawIn 对同一个节点只能用一个）。要先淡入、后变淡，写成一条 fade 关键帧，或外面再包一层 <g>："+(n.textContent||n.tagName).slice(0,20)); n.__op=1; }
+function fade(nodes,keys){ if(!nodes.length)nodes=[nodes]; nodes.forEach(own); add({keys:keys,ease:FADE,draw:function(v){ nodes.forEach(function(n){ n.style.opacity=v.o; }); }}); }
+/* show(节点, a)：a 时刻淡入，之后一直在。span(节点, a, b)：a 淡入，b 开始淡出 */
+function show(nodes,a){ fade(nodes,[[0,{o:0}],[a,{o:0}],[a+FD,{o:1}]]); }
+function span(nodes,a,b){ if(b<a)throw new Error("span：结束时刻 "+b+" 早于开始时刻 "+a); fade(nodes,[[0,{o:0}],[a,{o:0}],[Math.min(a+FD,b),{o:1}],[b,{o:1}],[b+FD,{o:0}]]); }
+/* moveBox(rect, keys)：rect 按 {x,y,w,h,o} 关键帧移动 */
+function moveBox(r,keys){ own(r); add({keys:keys,draw:function(v){ box(r,v); r.style.opacity=v.o; }}); }
+/* drawIn(path, a, b, out)：线从起点「画」到终点（a→b），out 时刻淡出（不给就一直在） */
+function drawIn(path,a,b,out){
+  own(path); var L=path.getTotalLength(); path.setAttribute("stroke-dasharray",L+" "+L);
+  var k=[[0,{d:0,o:0}],[a,{d:0,o:0}],[a+0.01,{o:1}],[b,{d:1,o:1}]];
+  if(out!=null) k.push([out,{o:1}],[out+FD,{o:0}]);
+  add({keys:k,draw:function(v){ path.setAttribute("stroke-dashoffset",L*(1-v.d)); path.style.opacity=v.o; }});
+}
+
+/* 三层和箭头头（画面代码直接用） */
+var ACT="#e8590c";                                       // 动作色：箭头、圈、「正在发生」的小字
+var defs=el("defs",{});
+defs.innerHTML='<marker id="arw" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="'+ACT+'"/></marker>';
+var BG=el("g",{}), MID=el("g",{}), FG=el("g",{});
+/* frame(x,y,w,h,标题,小字,层,样式)：带标题的框，返回 <g>。框里的东西往这个 g 里加，整组淡入淡出就对它做 */
+function frame(x,y,w,h,title,sub,parent,cls){
+  var g=el("g",{},parent||MID); el("rect",{"class":cls||"fx-box",x:x,y:y,width:w,height:h,rx:16},g);
+  if(title)txt("fx-t",x+16,y+24,title,g); if(sub)txt("fx-s",x+16,y+46,sub,g); return g;
+}
+/* arrow(路径, a, b, out)：橙色带箭头的线，a→b 画出来，out 时刻退场（不给就一直在） */
+function arrow(d,a,b,out,parent){ var pth=el("path",{d:d,fill:"none",stroke:ACT,"stroke-width":1.5,"marker-end":"url(#arw)"},parent||FG); drawIn(pth,a,b,out); return pth; }
+/* notes(几行字, x, y, a, b, 样式)：逐行出现（每行晚 0.04），b 时刻一起退场（不给就一直在） */
+function notes(lines,x,y,a,b,cls,parent){
+  return lines.map(function(s,j){ var t=txt(cls||"fx-note",x,y+j*24,s,parent||FG), ta=a+j*0.04; if(b==null)show([t],ta); else span([t],ta,Math.max(b,ta)); return t; });
+}
+/* legend([[名字,颜色],…], x, y)：图例，一直在 */
+function legend(items,x,y,parent){
+  var g=el("g",{},parent||BG), cx=x;
+  items.forEach(function(it){ el("rect",{x:cx,y:y-6,width:12,height:12,rx:2,fill:it[1]},g); var t=txt("fx-s",cx+18,y,it[0],g); cx+=18+t.getComputedTextLength()+24; });
+  return g;
+}
+
+/* 按 MODULES 生成导航、模块页 */
+(function(){
+  var nav=document.getElementById("nav"), h='<a class="mark" href="#top" data-go="0"></a>';
+  MODULES.forEach(function(m,i){ h+='<a href="#'+m.id+'" data-go="'+(i+1)+'"></a>'; });
+  h+='<a href="#where" data-go="'+(NMOD+1)+'"></a><button id="play" type="button" aria-pressed="false">▶ 自动播放</button><button id="zoom" type="button" aria-pressed="false" title="让图占满屏幕（快捷键 F）">⤢ 放大图</button>';
+  nav.innerHTML=h;
+  var as=nav.querySelectorAll("a"); as[0].textContent=PAGE.mark;
+  MODULES.forEach(function(m,i){ as[i+1].textContent=m.nav||m.title; }); as[NMOD+1].textContent=PAGE.end.nav;
+  var end=document.getElementById("where");
+  MODULES.forEach(function(m,i){
+    var s=document.createElement("section"); s.className="page mod"; s.id=m.id;
+    s.innerHTML='<div class="col"><p class="meta r"><span class="num">'+("0"+(i+1)).slice(-2)+'</span><span></span></p><h2 class="r"></h2><p class="line r"></p><ol class="steps r"></ol>'+
+      '<div class="ctl"><button type="button" data-d="-1">‹ 上一步</button><button type="button" data-d="1">下一步 ›</button></div></div>';
+    s.querySelector(".meta span:last-child").textContent=m.meta||"";
+    s.querySelector("h2").textContent=m.title; s.querySelector(".line").textContent=m.line||"";
+    end.parentNode.insertBefore(s,end);
+  });
+})();
+function rich(parent,s){      // 说明里的 **重点**、`代码`、{{不拆行的词}}
+  var re=/(\*\*[^*]+\*\*|`[^`]+`|\{\{[^}]+\}\})/g, last=0, m;
+  while((m=re.exec(s))){
+    if(m.index>last)parent.appendChild(document.createTextNode(s.slice(last,m.index)));
+    var t=m[0], c=t.charAt(0), n=document.createElement(c==="*"?"b":c==="`"?"code":"span");
+    if(c==="{")n.className="nw";
+    n.textContent=c==="`"?t.slice(1,-1):t.slice(2,-2); parent.appendChild(n); last=re.lastIndex;
+  }
+  if(last<s.length)parent.appendChild(document.createTextNode(s.slice(last)));
+}
+function fillDesc(boxEl,k){      // 一句话 + 要点
+  boxEl.textContent="";
+  var p=document.createElement("p"); p.className="lead"; rich(p,STEPS[k].lead||""); boxEl.appendChild(p);
+  if(STEPS[k].pts&&STEPS[k].pts.length){
+    var ul=document.createElement("ul"); ul.className="pts";
+    STEPS[k].pts.forEach(function(s){ var li=document.createElement("li"); rich(li,s); ul.appendChild(li); });
+    boxEl.appendChild(ul);
+  }
+}
+STEPS.forEach(function(s,i){
+  var li=document.createElement("li"); li.className="st"; li.setAttribute("data-n",("0"+(i+1)).slice(-2));
+  li.innerHTML='<div class="t"></div><div class="d"><div class="dx"></div></div>';
+  li.querySelector(".t").textContent=s.t; fillDesc(li.querySelector(".dx"),i);
+  li.addEventListener("click",function(){ stopAuto(); goSection(PH[i]+1); later(function(){ replay(i); }); });
+  document.getElementById(MODULES[PH[i]].id).querySelector(".steps").appendChild(li);
+});
+(function(){   // 结尾页的「全过程一览」：每步一行（标题 + 那一句话），点一下回到那一步
+  var rc=document.getElementById("recap"); if(!rc)return;
+  STEPS.forEach(function(s,i){
+    var li=document.createElement("li"), d=document.createElement("div"), b=document.createElement("b");
+    li.setAttribute("data-n",("0"+(i+1)).slice(-2)); b.textContent=s.t+"　"; d.appendChild(b); rich(d,s.lead||""); li.appendChild(d);
+    li.addEventListener("click",function(){ stopAuto(); goSection(PH[i]+1); later(function(){ replay(i); }); });
+    rc.appendChild(li);
+  });
+})();
+
+/* ================================================================
+   C. 画面：有哪些东西、每一步里它们怎么动 —— 改这里
+   - 画布 1000 × 640。先摆布局常量，再按「从底层到上层」建对象。
+   - 时间一律写 T("步骤 id", 比例)。每一步的动作要在这一步结束（比例 1）前走完。
+   - 颜色语义固定下来，全页一致；动作也一样（这里：橙线 = 发出请求，色块飞过去 = 数据送到，橙圈 = 大家共用的那一份）。
+   - 三层：BG（底）、MID（框和内容）、FG（箭头、飞行的块、说明）。
+   ================================================================ */
+var C={data:"#2f9488",app:"#7a5fc8",act:ACT,up:"#3f5bd0"};   // data：数据 · app：程序 · act：动作（箭头、圈）· up：结论
+
+var PX=[60,370,680], PY=40, PW=260, PH_=110;           // 三个页面
+var CACHE={x:300,y:270,w:400,h:110}, DB={x:300,y:500,w:400,h:110};
+var SLOT={w:120,h:36};
+function slotAt(b){ return {x:b.x+30,y:b.y+52,w:SLOT.w,h:SLOT.h}; }
+function pageSlot(i){ return {x:PX[i]+70,y:PY+60,w:SLOT.w,h:SLOT.h}; }
+function block(parent){ return el("rect",{rx:5,fill:C.data,"fill-opacity":.85},parent||FG); }      // 一份数据
+function slot(s,parent){ return el("rect",{x:s.x,y:s.y,width:s.w,height:s.h,rx:5,fill:"none",stroke:"rgba(47,148,136,.5)","stroke-dasharray":"3 3"},parent); }   // 放数据的空位
+
+legend([["数据",C.data],["正在发生的动作",C.act]],40,626);
+
+/* 数据库（最底层，第 1 步最先出现）。
+   data-box / data-in 是给自测脚本用的归属标记：标了 data-in 的东西要一直待在同名的 data-box 里（只给「一直待在框里」的东西标，飞来飞去的块不标） */
+var dbG=frame(DB.x,DB.y,DB.w,DB.h,"数据库",null,BG,"fx-disk");
+dbG.firstChild.setAttribute("data-box","db");
+txt("fx-s",DB.x+70,DB.y+24,"商品表",dbG);
+var row=slotAt(DB);
+el("rect",{x:row.x,y:row.y,width:row.w,height:row.h,rx:5,fill:C.data,"fill-opacity":.85,"data-in":"db"},dbG);
+txt("fx-s",row.x+row.w+12,row.y+row.h/2,"要显示的那条商品信息",dbG);
+// 先淡入；到最后一步用不上了，变淡。一个节点的透明度只能由一处管，所以写成一条 fade
+fade([dbG],[[0,{o:0}],[T("db",.15),{o:0}],[T("db",.45),{o:1}],[T("hit",.6),{o:1}],[T("hit",.75),{o:.35}]]);
+
+/* 读库次数（右下角的计数）：数字在某个时刻「跳」一下 */
+var cnt=txt("fx-t",DB.x+DB.w+40,DB.y+40,"0",BG); cnt.style.fontSize="34px"; cnt.style.fill=C.data;
+var cntL=txt("fx-s",DB.x+DB.w+40,DB.y+76,"数据库被读的次数",BG);
+show([cnt,cntL],T("db",.6));
+function jumpTo(t,n){ return [[t-0.01,{n:n-1}],[t,{n:n}]]; }     // 在 t 时刻从 n-1 跳到 n
+add({keys:[[0,{n:0}]].concat(jumpTo(T("direct",.24),1),jumpTo(T("direct",.54),2),jumpTo(T("direct",.84),3),[[T("fill",.04),{n:3}],[T("fill",.05),{n:0}]],jumpTo(T("fill",.5),1)),
+  draw:function(v){ cnt.textContent=String(Math.round(v.n)); }});
+
+/* 三个页面：第 2 步里一个接一个出现，各读一次库 */
+PX.forEach(function(x,i){
+  var b=0.06+i*0.3;                                       // 第 i 个页面在「direct」这一步里从 b 开始
+  var g=frame(x,PY,PW,PH_,"页面 "+(i+1),"要显示商品信息"), ps=pageSlot(i);
+  slot(ps,g);
+  show([g],T("direct",b));
+  // 请求：从页面到数据库的箭头，这一步结束时退场
+  arrow("M"+(x+130)+" "+(PY+PH_+2)+"L"+(DB.x+110+i*90)+" "+(DB.y-4),T("direct",b+.1),T("direct",b+.17),T("direct",1));
+  // 数据：从数据库那一行飞到页面里；下一步「从头看」时清掉
+  moveBox(block(),[[0,mix(row,{o:0})],[T("direct",b+.17),{o:0}],[T("direct",b+.19),{o:1}],[T("direct",b+.29),mix(ps,{o:1})],[T("fill",0),{o:1}],[T("fill",.08),{o:0}]]);
+});
+// 一步一句的结论：放在两排东西之间的空带上，居中、加 halo
+span([txt("fx-note halo",500,215,"没有缓存：每个页面都要读一次数据库",FG,{"text-anchor":"middle"})],T("direct",.86),T("direct",1));   // 淡入要 0.1，所以最晚从 0.9 之前开始
+
+/* 缓存：第 3 步才出现（先底层、后上层；这一步「从头看」：上一步的数据清掉、计数归零、配一句橙色小字） */
+var cG=frame(CACHE.x,CACHE.y,CACHE.w,CACHE.h,"缓存",null,MID);
+cG.firstChild.setAttribute("style","fill:rgba(47,148,136,.05);stroke:rgba(47,148,136,.5)");
+txt("fx-s",CACHE.x+56,CACHE.y+24,"在内存里",cG);
+var cs=slotAt(CACHE); slot(cs,cG);
+show([cG],T("fill",.1));
+span([txt("fx-note act",CACHE.x+CACHE.w-16,CACHE.y+24,"换成有缓存，从头看",FG,{"text-anchor":"end"})],T("fill",.12),T("fill",1));
+
+/* 第 3 步：页面 1 → 缓存（没有）→ 数据库；读回来在缓存里留一份，再给页面 1 */
+var toCache=function(i){ return "M"+(PX[i]+130)+" "+(PY+PH_+2)+"V200H"+(cs.x+60)+"V"+(CACHE.y-4); };   // 各页面的请求共用后半段，看起来汇成一条
+arrow(toCache(0),T("fill",.24),T("fill",.34),T("fill",1));
+span([txt("fx-note red",cs.x+cs.w+12,cs.y+cs.h/2,"缓存里没有",FG)],T("fill",.34),T("fill",.5));
+arrow("M"+(cs.x+60)+" "+(CACHE.y+CACHE.h+2)+"V"+(DB.y-4),T("fill",.38),T("fill",.46),T("fill",1));
+moveBox(block(),[[0,mix(row,{o:0})],[T("fill",.48),{o:0}],[T("fill",.5),{o:1}],[T("fill",.62),mix(cs,{o:1})]]);          // 留在缓存里的那一份
+var got=txt("fx-note",cs.x+cs.w+12,cs.y+cs.h/2,"留一份在缓存里",FG); got.style.fill=C.data; show([got],T("fill",.62));
+moveBox(block(),[[0,mix(cs,{o:0})],[T("fill",.68),{o:0}],[T("fill",.7),{o:1}],[T("fill",.84),mix(pageSlot(0),{o:1})]]);   // 再给页面 1
+
+/* 第 4 步：页面 2、3 的请求汇到缓存里同一份上（橙圈），数据从缓存返回 */
+[1,2].forEach(function(i,n){
+  arrow(toCache(i),T("hit",.08+n*.05),T("hit",.22+n*.05),T("hit",1));
+  moveBox(block(),[[0,mix(cs,{o:0})],[T("hit",.36+n*.14),{o:0}],[T("hit",.38+n*.14),{o:1}],[T("hit",.52+n*.14),mix(pageSlot(i),{o:1})]]);
+});
+span([el("rect",{x:cs.x-5,y:cs.y-5,width:cs.w+10,height:cs.h+10,rx:9,fill:"none",stroke:C.act,"stroke-width":2},FG)],T("hit",.28),T("hit",1));
+// 小注区：画布一角固定留一块，每步 2–4 行（细节、数字出处），逐行出现
+notes(["页面 2、3 没碰数据库","一共只读了 1 次"],40,530,T("hit",.76),null,"fx-note blue");
+
+/* ================================================================
+   B2. 引擎（下半）：播放、翻页、导航 —— 一般不用改
+   ================================================================ */
+var capn=document.getElementById("capn"), capph=document.getElementById("capph"), capt=document.getElementById("capt"), capd=document.getElementById("capd");
+var barf=document.getElementById("barfill"), lis=[].slice.call(document.querySelectorAll(".steps li.st")), dock=document.getElementById("dock");
+var p=0;
+function render(v){
+  p=v;
+  for(var i=0;i<OBJ.length;i++){ var o=OBJ[i]; o.draw(at(o.keys,v,o.ease||MOVE)); }
+  barf.style.width=(v/NSTEP*100)+"%";
+}
+var shown=-1;
+function showStep(k){
+  if(k===shown)return; shown=k;
+  lis.forEach(function(li,j){ li.classList.toggle("on",j===k); });
+  if(k>=0&&k<NSTEP){ capn.textContent=("0"+(k+1)).slice(-2); capph.textContent=MODULES[PH[k]].title; capt.textContent=STEPS[k].t; fillDesc(capd,k); }
+  markRail();
+  keepInView(k);
+}
+/* 步骤多时，左边这一列跟着往上挪，保证当前这一步的说明整段都在屏幕里 */
+var kvRaf=0, kvT0=0;
+function keepInView(k){
+  var li=lis[k]; if(!li)return;
+  var col=li.closest(".col"); if(!col)return;
+  cancelAnimationFrame(kvRaf); kvT0=performance.now();
+  (function f(){
+    var shift=+(col.dataset.shift||0);
+    if(!window.matchMedia("(min-width:901px)").matches){ if(shift){ col.style.transform=""; col.dataset.shift=0; } return; }
+    // 按「这一页自己的顶」来算，不按当前视口：页面还没滚到这一段时也不会把它挪进别的页
+    var sec=li.closest("section"), top0=sec?sec.getBoundingClientRect().top:0;
+    var r=li.getBoundingClientRect(), b=r.bottom-top0, t=r.top-top0, over=b-(window.innerHeight-48);
+    var want=Math.max(0,shift+over);
+    if(t-(want-shift)<96)want=Math.max(0,shift+(t-96));   // 这一步本身太高时，至少让标题露出来
+    var next=reduced?want:shift+(want-shift)*0.2;
+    if(Math.abs(want-next)<0.5)next=want;
+    col.dataset.shift=next; col.style.transform=next?"translateY("+(-next)+"px)":"";
+    if(performance.now()-kvT0<1400)kvRaf=requestAnimationFrame(f);
+  })();
+}
+
+/* 播放：一次一步，每步按自己的时长走完 */
+var target=0, tw=null, raf=0, onSettle=null, replaying=false, SPEED=1;   // SPEED：自测脚本把它调小，让动画和滚动走快
+function tween(to,dur,done){
+  cancelAnimationFrame(raf);
+  dur*=SPEED;
+  if(reduced||dur<=1){ tw=null; render(to); done(); return; }
+  tw={from:p,to:to,t0:performance.now(),dur:dur,done:done};
+  raf=requestAnimationFrame(function f(ts){
+    if(!tw)return;
+    var u=Math.min(1,Math.max(0,(ts-tw.t0)/tw.dur));
+    render(tw.from+(tw.to-tw.from)*u);
+    if(u<1){ raf=requestAnimationFrame(f); return; }
+    var d=tw.done; tw=null; d();
+  });
+}
+function drive(){
+  var goal=target+1;                                        // 第 target 步走完 = 时间轴 target+1
+  if(Math.abs(goal-p)<1e-6){ showStep(target); if(onSettle){ var cb=onSettle; onSettle=null; cb(); } return; }
+  var fwd=goal>p, n, to, base;
+  if(tw){ if((tw.to>tw.from)===fwd)return; tw=null; }        // 方向反了：从当前位置立刻往回走
+  if(fwd){ n=Math.floor(p+1e-9); to=n+1; base=DUR[n]; }
+  else { n=Math.ceil(p-1e-9)-2; to=n+1; base=DUR[n+1]*0.72; }
+  var queued=(n!==target)?0.62:1;                            // 连着翻好几步时，中间几步走快一点
+  showStep(n);
+  tween(to, base*queued*Math.abs(to-p), drive);
+}
+function stepBy(d){ var t=Math.max(0,Math.min(NSTEP-1,target+d)); if(t===target)return false; target=t; drive(); return true; }
+function fadeFig(o,ms,done){
+  if(reduced){ svg.style.opacity=o; done(); return; }
+  var a=svg.animate([{opacity:getComputedStyle(svg).opacity},{opacity:o}],{duration:ms,easing:"cubic-bezier(.25,.1,.25,1)",fill:"forwards"});
+  a.onfinish=function(){ svg.style.opacity=o; a.cancel(); done(); };
+}
+function replay(j){        // 点某一步：淡出，回到这一步开始前，淡入，再按正常节奏把这一步走一遍
+  if(j===target+1){ target=j; drive(); return; }          // 点的正好是下一步：接着往下播，不淡出（不闪）
+  cancelAnimationFrame(raf); tw=null; target=j; replaying=true;
+  fadeFig(0,240,function(){
+    render(j); showStep(j);
+    fadeFig(1,300,function(){ setTimeout(function(){ replaying=false; drive(); },120); });
+  });
+}
+
+/* 翻页：桌面上一次手势 / 一次按键只走一格 */
+var pages=[document.getElementById("top")].concat(MODULES.map(function(m){ return document.getElementById(m.id); }),[document.getElementById("where")]);
+var section=0, pinned=false, scrolling=null;
+function pageTop(i){ return pages[i].getBoundingClientRect().top+window.scrollY; }
+function scrollToY(y,ms,done){
+  cancelAnimationFrame(scrolling&&scrolling.raf);
+  var y0=window.scrollY, t0=performance.now(); ms*=SPEED;
+  if(reduced||Math.abs(y-y0)<2){ window.scrollTo(0,y); scrolling=null; if(done)done(); return; }
+  scrolling={raf:0};
+  (function f(ts){ var u=Math.min(1,Math.max(0,(ts-t0)/ms)); window.scrollTo(0,y0+(y-y0)*SCROLL(u));
+    if(u<1){ scrolling.raf=requestAnimationFrame(f); } else { scrolling=null; if(done)done(); } })(t0);
+}
+function enter(i){
+  var els=pages[i].querySelectorAll(".r");
+  if(reduced||!els.length)return;
+  [].forEach.call(els,function(e,j){ e.animate([{opacity:0,transform:"translateY(16px)"},{opacity:1,transform:"none"}],{duration:900,delay:260+j*80,easing:"cubic-bezier(.16,1,.3,1)",fill:"backwards"}); });
+}
+var pendingShow=false, afterScroll=null;   // 从开头 / 结尾滚进来：先滚完，图再出来，动画也等那时再走
+function later(fn){ if(pendingShow)afterScroll=fn; else fn(); }
+var enteredFirst=false;                    // 刚从别处进到第一个模块：第 1 步要重新播一遍
+function goSection(i){
+  i=Math.max(0,Math.min(pages.length-1,i));
+  if(i===section&&!scrolling&&Math.abs(window.scrollY-pageTop(i))<2)return;
+  var from=section; section=i; markNav(); if(i===1&&from!==1)enteredFirst=true;
+  if(i>=1&&i<=NMOD&&!dock.classList.contains("on"))pendingShow=true;
+  else { pendingShow=false; afterScroll=null; showDock(); }
+  scrollToY(pageTop(i),1100,function(){ if(!pendingShow)return; pendingShow=false; showDock(); var f=afterScroll; afterScroll=null; if(f)f(); });
+  if(i!==from)enter(i);
+}
+function showDock(){ dock.classList.toggle("on",section>=1&&section<=NMOD); }
+function syncTo(ph){        // 到了某个模块：图要停在这个模块里
+  if(ph===0&&enteredFirst&&target===0){ enteredFirst=false; cancelAnimationFrame(raf); tw=null; render(0); showStep(0); drive(); return; }
+  enteredFirst=false;
+  if(PH[target]===ph){ if(target===0&&p<1-1e-6&&!tw)drive(); return; }   // 第一次进来：把第 1 步播一遍
+  if(target===FIRST[ph]-1){ stepBy(1); return; }            // 正好是上一模块最后一步：接着往下播
+  if(target===LAST[ph]+1){ stepBy(-1); return; }            // 从下一模块第一步往回
+  replay(FIRST[ph]);
+}
+function markNav(){
+  [].forEach.call(document.querySelectorAll(".nav a[data-go]"),function(a){ a.setAttribute("aria-current",+a.getAttribute("data-go")===section?"true":"false"); });
+  markRail();
+}
+/* 左边目录：开头 · 各模块（各自的步骤号）· 结尾 */
+var rail=document.getElementById("rail"), railSec=[], railNum=[];
+(function(){
+  var SECS=["开头"].concat(MODULES.map(function(m){ return m.rail||m.title; }),[PAGE.end.rail||PAGE.end.nav]);
+  SECS.forEach(function(name,i){
+    if(i>0)rail.appendChild(document.createElement("i"));
+    var a=document.createElement("a"); a.className="sec"; a.textContent=name; a.href="#"+pages[i].id;
+    a.addEventListener("click",function(ev){ ev.preventDefault(); stopAuto(); goSection(i); if(i>=1&&i<=NMOD)later(function(){ syncTo(i-1); }); });
+    rail.appendChild(a); railSec.push(a);
+    if(i>=1&&i<=NMOD){ for(var k=FIRST[i-1];k<=LAST[i-1];k++){ (function(k){
+      var n=document.createElement("a"); n.className="num"; n.textContent=("0"+(k+1)).slice(-2); n.title=STEPS[k].t;
+      n.addEventListener("click",function(){ stopAuto(); goSection(PH[k]+1); later(function(){ replay(k); }); });
+      rail.appendChild(n); railNum.push(n); })(k); } }
+  });
+})();
+function markRail(){
+  if(!railSec.length)return;
+  var inMod=section>=1&&section<=NMOD;
+  railSec.forEach(function(a,i){ a.setAttribute("aria-current",(i===section&&!inMod)?"true":"false"); a.classList.toggle("in",inMod&&i===section); });
+  railNum.forEach(function(n,k){ n.setAttribute("aria-current",(inMod&&k===shown)?"true":"false"); });
+}
+function act(d){
+  if(pendingShow)return;                                   // 正在滚进图区：这一下不算
+  if(section>=1&&section<=NMOD){
+    var ph=section-1;
+    if(d>0){ if(target<LAST[ph])stepBy(1); else if(ph<NMOD-1){ goSection(section+1); stepBy(1); } else goSection(NMOD+1); }
+    else { if(target>FIRST[ph])stepBy(-1); else if(ph>0){ goSection(section-1); stepBy(-1); } else goSection(0); }
+  } else if(section===0){ if(d>0){ goSection(1); later(function(){ syncTo(0); }); } }
+  else if(d<0){ goSection(NMOD); later(function(){ syncTo(NMOD-1); }); }
+}
+function updatePinned(){ pinned=window.matchMedia("(min-width:901px)").matches; }
+updatePinned(); window.addEventListener("resize",function(){ updatePinned(); if(pinned)window.scrollTo(0,pageTop(section)); });
+
+var lastWheel=0, travel=0, used=false, prevAbs=0, prevSign=0, lastAct=0;
+window.addEventListener("wheel",function(ev){
+  if(!pinned||ev.ctrlKey||Math.abs(ev.deltaX)>Math.abs(ev.deltaY))return;
+  ev.preventDefault(); stopAuto();
+  var dy=ev.deltaY*(ev.deltaMode===1?16:ev.deltaMode===2?window.innerHeight:1), a=Math.abs(dy), sign=Math.sign(dy), now=performance.now();
+  var rising=a>prevAbs*2.5&&a>8&&now-lastAct>350;            // 惯性尾巴里又起一次新的轻扫
+  var flip=sign!==0&&prevSign!==0&&sign!==prevSign&&a>2;
+  if(now-lastWheel>200||rising||flip){ used=false; travel=0; }
+  lastWheel=now; prevAbs=a; if(sign)prevSign=sign;
+  if(used)return;
+  travel+=dy; if(Math.abs(travel)<30)return;
+  used=true; lastAct=now; act(travel>0?1:-1);
+},{passive:false});
+document.addEventListener("keydown",function(ev){
+  if(ev.altKey||ev.ctrlKey||ev.metaKey)return;
+  var d=0;
+  if(ev.key==="ArrowDown"||ev.key==="PageDown"||(ev.key===" "&&!ev.shiftKey))d=1;
+  else if(ev.key==="ArrowUp"||ev.key==="PageUp"||(ev.key===" "&&ev.shiftKey))d=-1;
+  if(!d)return;
+  if(!pinned){ if(section>=1&&section<=NMOD){ ev.preventDefault(); stopAuto(); act(d); } return; }
+  ev.preventDefault(); stopAuto();
+  if(ev.repeat&&performance.now()-lastAct<600)return;
+  lastAct=performance.now(); act(d);
+});
+var settleT=0;
+window.addEventListener("scroll",function(){   // 拖滚动条这类原生滚动：停下后吸附到最近的一页
+  if(scrolling)return;
+  clearTimeout(settleT);
+  settleT=setTimeout(function(){
+    var best=0,bd=1e9;
+    if(pinned){ pages.forEach(function(pg,i){ var dd=Math.abs(pg.getBoundingClientRect().top); if(dd<bd){bd=dd;best=i;} }); }
+    else { var mid=window.innerHeight*0.55; pages.forEach(function(pg,i){ if(pg.getBoundingClientRect().top<=mid)best=i; }); bd=0; }
+    if(best!==section){ section=best; if(best===1)enteredFirst=true; markNav(); showDock(); if(pinned)enter(best); if(best>=1&&best<=NMOD)syncTo(best-1); }
+    if(pinned&&bd>2)scrollToY(pageTop(best),600,null);
+  },180);
+},{passive:true});
+[].forEach.call(document.querySelectorAll(".nav a[data-go]"),function(a){
+  a.addEventListener("click",function(ev){ ev.preventDefault(); stopAuto(); var g=+a.getAttribute("data-go"); goSection(g); if(g>=1&&g<=NMOD)later(function(){ syncTo(g-1); }); });
+});
+
+/* 窄屏：按钮、左右轻扫翻步 */
+[].forEach.call(document.querySelectorAll(".mod .ctl button"),function(b){ b.addEventListener("click",function(){ stopAuto(); act(+b.getAttribute("data-d")); }); });
+var tx=0,ty=0;
+svg.addEventListener("touchstart",function(e){ tx=e.touches[0].clientX; ty=e.touches[0].clientY; },{passive:true});
+svg.addEventListener("touchend",function(e){ var t=e.changedTouches[0], dx=t.clientX-tx, dy=t.clientY-ty;
+  if(Math.abs(dx)>40&&Math.abs(dx)>Math.abs(dy)*1.3){ stopAuto(); act(dx<0?1:-1); } },{passive:true});
+
+/* 放大图、自动播放 */
+var zoomBtn=document.getElementById("zoom"), BIGKEY="anim.big:"+location.pathname;
+function setBig(on){
+  document.body.classList.toggle("big",on);
+  zoomBtn.setAttribute("aria-pressed",on?"true":"false"); zoomBtn.textContent=on?"⤡ 还原":"⤢ 放大图";
+  try{ localStorage.setItem(BIGKEY,on?"1":"0"); }catch(e){}
+}
+zoomBtn.addEventListener("click",function(){ setBig(!document.body.classList.contains("big")); if(section===0||section===NMOD+1){ goSection(1); later(function(){ syncTo(0); }); } });
+document.addEventListener("keydown",function(ev){ if(ev.altKey||ev.ctrlKey||ev.metaKey)return; if(ev.key==="f"||ev.key==="F"){ ev.preventDefault(); zoomBtn.click(); } });
+try{ if(localStorage.getItem(BIGKEY)==="1")setBig(true); }catch(e){}
+var playBtn=document.getElementById("play"), auto=false, autoT=0, DWELL=2600;   // 每步播完停多久再走下一步（留给读文字）
+function stopAuto(){ if(!auto)return; auto=false; clearTimeout(autoT); onSettle=null; playBtn.setAttribute("aria-pressed","false"); playBtn.textContent="▶ 自动播放"; }
+function autoNext(){
+  if(!auto)return;
+  if(target>=NSTEP-1){ stopAuto(); return; }
+  onSettle=function(){ autoT=setTimeout(autoNext,DWELL); };
+  act(1);
+}
+playBtn.addEventListener("click",function(){
+  if(auto){ stopAuto(); return; }
+  auto=true; playBtn.setAttribute("aria-pressed","true"); playBtn.textContent="❚❚ 暂停";
+  goSection(PH[target>=NSTEP-1?0:target]+1);
+  later(function(){
+    var begin=function(){ if(target===0&&p<1-1e-6){ onSettle=function(){ autoT=setTimeout(autoNext,DWELL); }; drive(); } else autoT=setTimeout(autoNext,900); };
+    if(target>=NSTEP-1){ cancelAnimationFrame(raf); tw=null; target=0;
+      fadeFig(0,240,function(){ render(0); showStep(0); fadeFig(1,300,begin); }); }
+    else begin();
+  });
+});
+
+/* 起始 */
+render(0); showStep(0); markNav();
+if(pinned){ var best=0,bd=1e9; pages.forEach(function(pg,i){ var dd=Math.abs(pg.getBoundingClientRect().top); if(dd<bd){bd=dd;best=i;} }); section=best; markNav(); }
+showDock();
+if(section>=1&&section<=NMOD)setTimeout(function(){ syncTo(section-1); },500);   // 刷新后停在某个模块（浏览器恢复了滚动位置）：把这个模块的第一步播一遍
+/* 给自测脚本用（scripts/check.js） */
+function jump(k){ cancelAnimationFrame(raf); tw=null; target=k; render(k+1); showStep(k); }   // 直接停到第 k 步的终态（不播动画）
+window.__anim={render:render,stepBy:stepBy,replay:replay,goSection:goSection,jump:jump,speed:function(x){ SPEED=x; },n:NSTEP,stepMod:PH.slice(),mods:MODULES.map(function(m){ return m.id; }),T:T,
+  state:function(){ return {p:p,target:target,section:section,shown:shown,busy:!!tw||!!scrolling||pendingShow||replaying}; }};
+})();
+</script>
+</body>
+</html>
