@@ -67,6 +67,10 @@ code{white-space:nowrap;font-family:var(--mono);font-size:.86em;color:var(--ink)
 .steps>li.on{color:var(--ink)}
 .steps>li.on::before{color:var(--accent)}
 .steps>li.on .d{grid-template-rows:1fr;opacity:1;margin-top:6px;transition:grid-template-rows .9s var(--ease-out),opacity .7s var(--ease) .18s,margin .9s var(--ease-out)}
+.steps>li .rp{position:absolute;right:0;top:7px;border:1px solid var(--accent);background:transparent;border-radius:999px;padding:6px 11px;font-family:inherit;font-size:13px;font-weight:500;line-height:1;white-space:nowrap;color:var(--accent);cursor:pointer;opacity:0;pointer-events:none;transition:opacity .4s var(--ease),background .2s}
+.steps>li.on .rp{opacity:1;pointer-events:auto}
+.steps>li.on .t{padding-right:78px}
+.steps>li .rp:hover{background:var(--accent);color:#fff}
 .steps>li .d>.dx{overflow:hidden;font-size:15px;line-height:1.65;color:var(--ink2)}
 .lead{margin:0;color:var(--ink)}
 .pts{list-style:none;margin:8px 0 0;padding:0}
@@ -162,7 +166,7 @@ svg text{font-family:var(--font)}
     <h1 class="r">同一份数据<br>为什么不用每次都查库<span class="alt">没有缓存 → 加一层缓存</span></h1>
     <p class="lede r">三个页面要显示同一条商品信息，分两段看：</p>
     <div class="stages r"><div><span class="k">01</span><span class="h">没有缓存</span><span class="s">每个页面都去数据库读一次：<b>3 个页面，读 3 次</b></span></div><div><span class="k">02</span><span class="h">加一层缓存</span><span class="s">第一次读完放进缓存，后面的页面直接读缓存：<b>数据库只读 1 次</b></span></div></div>
-    <p class="hint r">滚轮、方向键或空格：一次走一步　·　点任一步：重放那一步　·　顶部「放大图」或按 F：图占满屏幕</p>
+    <p class="hint r">滚轮、方向键或空格：一次走一步　·　点当前步右边的「↻ 重放」：把这一步再放一遍　·　顶部「放大图」或按 F：图占满屏幕</p>
   </div>
 </header>
 
@@ -366,6 +370,8 @@ STEPS.forEach(function(s,i){
   var li=document.createElement("li"); li.className="st"; li.setAttribute("data-n",("0"+(i+1)).slice(-2));
   li.innerHTML='<div class="t"></div><div class="d"><div class="dx"></div></div>';
   li.querySelector(".t").textContent=s.t; fillDesc(li.querySelector(".dx"),i);
+  var rp=document.createElement("button"); rp.type="button"; rp.className="rp"; rp.textContent="\u21bb 重放"; rp.title="把这一步再放一遍"; rp.setAttribute("aria-label","重放这一步");
+  rp.addEventListener("click",function(){ rp.blur(); }); li.appendChild(rp);   // 点击冒泡到 li，由下面这句统一重放
   li.addEventListener("click",function(){ stopAuto(); goSection(PH[i]+1); later(function(){ replay(i); }); });
   document.getElementById(MODULES[PH[i]].id).querySelector(".steps").appendChild(li);
 });
